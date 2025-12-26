@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>스마트 포커스 타이머 V5.4 (Zero Flicker)</title>
+    <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css" />
+    <style>
+        :root {
+            --bg-color: #f0f2f5;
+            --panel-bg: #ffffff;
+            --text-main: #2c3e50;
+            --text-sub: #666;
+            --accent-color: #5c6bc0;
+            --study-color: #3f51b5; --study-bg: #e8eaf6;
+            --break-color: #43a047; --break-bg: #e8f5e9;
+            --lunch-color: #f57c00; --lunch-bg: #fff3e0;
+            --border-color: #eee;
+        }
+
+        /* [수정 1] 배경색 변수를 html 태그에 직접 적용 (깜빡임 해결 핵심) */
+        html {
+            background-color: var(--bg-color);
+            transition: none; /* View Transition과 충돌 방지 */
+        }
+
+        /* 다크모드 변수 */
+        html.dark-mode {
+            --bg-color: #1a1a1a;
+            --panel-bg: #2d2d2d;
+            --text-main: #e0e0e0;
+            --text-sub: #aaa;
+            --border-color: #444;
+            --study-bg: #1e2336;
+            --break-bg: #1b2e1e;
+            --lunch-bg: #33261a;
+        }
+
+        /* [수정 2] View Transition 렌더링 안정화 */
+        ::view-transition-old(root),
+        ::view-transition-new(root) {
+            animation: none;
+            mix-blend-mode: normal;
+            display: block;
+            will-change: clip-path;
+        }
+        
+        /* 이미지 쌍 격리 (혼합 문제 방지) */
+        ::view-transition-image-pair(root) {
+            isolation: isolate;
+        }
+
+        /* 레이어 순서 (Z-Index Logic) */
+        /* 기본: Dark -> Light (Light가 위에서 커짐) */
+        ::view-transition-new(root) { z-index: 9999; }
+        ::view-transition-old(root) { z-index: 1; }
+
+        /* 다크모드 진입: Light -> Dark (Light가 위에서 작아짐) */
+        html.dark-mode::view-transition-old(root) { z-index: 9999; }
+        html.dark-mode::view-transition-new(root) { z-index: 1; }
+
+        /* [수정 3] body의 background 및 transition 제거 */
+        body { 
+            font-family: 'Pretendard', sans-serif; 
+            background-color: transparent; /* 배경은 html이 담당 */
+            margin: 0; padding: 20px; 
+            display: flex; flex-direction: column; align-items: center; gap: 20px; 
+            color: var(--text-main); 
+            transition: color 0.3s; /* 텍스트 색상만 부드럽게 변경 */
+        }
+
+        .mode-toggle { position: fixed; top: 20px; right: 20px; z-index: 1000; }
+        .mode-toggle button { width: auto; padding: 8px 15px; background: var(--panel-bg); color: var(--text-main); border: 1px solid var(--border-color); font-size: 14px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+
+        /* 대시보드 */
+        .dashboard {
+            width: 100%; max-width: 1000px;
+            background: var(--panel-bg); border-radius: 20px;
+            padding: 30px; box-sizing: border-box;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.05);
+            text-align: center; border: 3px solid transparent; transition: 0.3s;
+            position: relative; overflow: hidden;
+            z-index: 1;
+        }
+        .dashboard.mode-study { border-color: var(--study-color); background: var(--study-bg); }
+        .dashboard.mode-break { border-color: var(--break-color); background: var(--break-bg); }
+        .dashboard.mode-lunch { border-color: var(--lunch-color); background: var(--lunch-bg); }
+
+        #visualizerCanvas {
+            position: absolute; bottom: 0; left: 0; width: 100%; height: 150px;
+            pointer-events: none; opacity: 0.6; z-index: 0; display: none;
+        }
+
+        .dashboard-content { position: relative; z-index: 2; }
+        .big-clock { font-size: 3.5rem; font-weight: 800; color: var(--text-main); margin-bottom: 5px; font-variant-numeric: tabular-nums; text-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+        .current-activity { font-size: 2rem; font-weight: bold; margin: 10px 0; color: var(--text-sub); min-height: 2.5rem; }
+        
+        .dashboard.mode-study .current-activity { color: var(--study-color); }
+        .dashboard.mode-break .current-activity { color: var(--break-color); }
+        .dashboard.mode-lunch .current-activity { color: var(--lunch-color); }
+        
+        .remain-time { font-size: 1.2rem; color: var(--text-sub); font-weight: 500; background: rgba(0,0,0,0.05); display: inline-block; padding: 5px 20px; border-radius: 30px; backdrop-filter: blur(5px); }
+        .now-playing { margin-top: 15px; font-size: 0.9rem; color: var(--text-sub); min-height: 1.2rem; opacity: 0.8; font-weight: normal; }
+
+        /* 타임라인 */
+        .timeline-wrapper {
+            width: 100%; max-width: 1000px;
+            background: var(--panel-bg); padding: 40px 20px 30px 20px;
+            border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+            box-sizing: border-box; overflow-x: auto;
+        }
+        .timeline-container { position: relative; height: 60px; margin-top: 10px; border-bottom: 2px solid var(--border-color); width: 100%; min-width: 600px; }
+        .schedule-box {
+            position: absolute; top: 10px; height: 50px; border-radius: 6px; cursor: pointer;
+            transition: 0.2s; opacity: 0.6; display: flex; align-items: center; justify-content: center;
+            font-size: 0.85rem; color: rgba(255,255,255,0.95); overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+        }
+        .schedule-box.active { opacity: 1; transform: scaleY(1.15); z-index: 10; border: 2px solid var(--panel-bg); font-weight: 800; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
+        .box-study { background: var(--study-color); }
+        .box-break { background: var(--break-color); top: 18px; height: 42px; font-size: 0.75rem; }
+        .box-lunch { background: var(--lunch-color); }
+
+        .time-marker { position: absolute; bottom: -28px; font-size: 11px; color: var(--text-sub); transform: translateX(-50%); }
+        .current-line { position: absolute; top: -15px; bottom: -5px; width: 2px; background: #ff1744; z-index: 20; display: none; }
+
+        /* 설정 패널 */
+        .collapsible-wrapper { width: 100%; max-width: 1000px; background: var(--panel-bg); border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); overflow: hidden; transition: background 0.3s; }
+        .collapse-header { 
+            padding: 15px 20px; background: rgba(0,0,0,0.03); cursor: pointer; display: flex; justify-content: space-between; align-items: center;
+            font-weight: bold; color: var(--text-sub); border-bottom: 1px solid var(--border-color);
+        }
+        
+        .collapse-content { 
+            padding: 25px; 
+            max-height: 1000px;
+            opacity: 1;
+            transition: max-height 0.5s ease-in-out, opacity 0.5s ease-in-out, padding 0.5s ease;
+            overflow: hidden;
+        }
+        .collapse-content.hidden { 
+            max-height: 0; opacity: 0; padding-top: 0; padding-bottom: 0; border: none; pointer-events: none;
+        }
+
+        .control-panel { display: flex; flex-direction: column; gap: 25px; }
+        .settings-row { display: flex; flex-wrap: wrap; gap: 20px; }
+        .settings-group { flex: 2; display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 15px; }
+        .audio-group { flex: 1.5; padding-left: 20px; border-left: 2px solid var(--border-color); display: flex; flex-direction: column; gap: 15px; }
+        
+        .volume-integrated {
+            width: 100%; background: rgba(0,0,0,0.02); padding: 15px; border-radius: 10px; border: 1px solid var(--border-color);
+            display: flex; flex-wrap: wrap; gap: 20px; box-sizing: border-box; margin-top: 10px;
+        }
+        .vol-control { flex: 1; min-width: 140px; display: flex; flex-direction: column; gap: 8px; }
+        .vol-control label { font-size: 12px; color: var(--text-sub); font-weight: bold; margin: 0; }
+        .vol-control input[type=range] { width: 100%; cursor: pointer; accent-color: var(--accent-color); }
+        @media (max-width: 768px) { .audio-group { border-left: none; padding-left: 0; border-top: 2px solid var(--border-color); padding-top: 20px; } }
+
+        label { font-size: 13px; font-weight: 700; color: var(--text-sub); display: block; margin-bottom: 6px; }
+        input[type="time"], input[type="number"], input[type="text"], input[type="file"] { 
+            width: 100%; padding: 10px; border: 1px solid var(--border-color); border-radius: 8px; box-sizing: border-box; 
+            font-family: inherit; background: var(--bg-color); color: var(--text-main);
+        }
+
+        .main-controls { width: 100%; max-width: 600px; display: flex; gap: 10px; justify-content: center; }
+        button { width: 100%; padding: 15px; border: none; border-radius: 12px; font-weight: bold; cursor: pointer; color: white; transition: 0.2s; font-size: 1.1rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        #startBtn { background: var(--accent-color); }
+        #stopBtn { background: #e53935; display: none; }
+        
+        @media (hover: hover) {
+            button:hover { transform: translateY(-2px); opacity: 0.9; }
+        }
+        button:active { transform: scale(0.98); opacity: 0.8; }
+
+        .toast { position: fixed; top: 30px; left: 50%; transform: translateX(-50%); background: rgba(33, 33, 33, 0.9); color: white; padding: 12px 25px; border-radius: 50px; z-index: 2000; opacity: 0; transition: opacity 0.4s; pointer-events: none; font-size: 0.9rem; }
+    </style>
+
+    <script>
+        try {
+            const savedSettings = localStorage.getItem('smartTimerV48_settings');
+            if (savedSettings) {
+                const settings = JSON.parse(savedSettings);
+                if (settings.darkMode) {
+                    document.documentElement.classList.add('dark-mode');
+                }
+            }
+        } catch (e) { console.warn('Theme loading error', e); }
+    </script>
+</head>
+<body>
+
+    <div class="mode-toggle">
+        <button onclick="toggleDarkMode(event)" id="darkModeBtn">🌙 다크 모드</button>
+    </div>
+
+    <div id="toast" class="toast">메시지</div>
+
+    <div class="dashboard" id="dashboard">
+        <canvas id="visualizerCanvas"></canvas>
+        <div class="dashboard-content">
+            <div class="big-clock" id="clockDisplay">AM 00:00</div>
+            <div class="current-activity" id="activityDisplay">준비 대기 중</div>
+            <div class="remain-time" id="remainDisplay">--분 남음</div>
+            <div class="now-playing" id="nowPlayingDisplay"></div>
+        </div>
+    </div>
+
+    <div class="timeline-wrapper">
+        <div class="timeline-container" id="timelineContainer">
+            <div id="currentLine" class="current-line"></div>
+        </div>
+    </div>
+
+    <div class="collapsible-wrapper">
+        <div class="collapse-header" onclick="toggleSettings()">
+            <span>⚙️ 루틴 설정 및 음원 관리</span>
+            <span id="collapseIcon">▼</span>
+        </div>
+        <div class="collapse-content hidden" id="settingsContent">
+            <div class="control-panel">
+                
+                <div class="settings-row">
+                    <div class="settings-group">
+                        <div><label>시작 시간</label><input type="time" id="startTime" class="save-target" value="09:00" onchange="renderTimeline()"></div>
+                        <div><label>총 교시</label><input type="number" id="totalPeriods" class="save-target" value="5" min="1" max="12" onchange="renderTimeline()"></div>
+                        <div><label>공부(분)</label><input type="number" id="studyMin" class="save-target" value="75" min="10" step="5" onchange="renderTimeline()"></div>
+                        <div><label>쉬는시간</label><input type="number" id="breakMin" class="save-target" value="15" min="5" step="5" onchange="renderTimeline()"></div>
+                        <div><label>점심(분)</label><input type="number" id="lunchMin" class="save-target" value="90" min="30" step="10" onchange="renderTimeline()"></div>
+                        <div><label>점심 위치(교시 후)</label><input type="number" id="lunchAfter" class="save-target" value="2" min="1" onchange="renderTimeline()"></div>
+                    </div>
+
+                    <div class="audio-group">
+                        <div><label>🔥 공부 MP3 (1곡 반복)</label><input type="file" id="mp3File" accept="audio/*"></div>
+                        <div><label>🌳 휴식 음악 (iPad: '선택' 누르고 다중 체크)</label><input type="file" id="breakFolder" accept="audio/*, .mp3, .wav, .m4a, .aac, .ogg" multiple></div>
+                    </div>
+                </div>
+
+                <div class="volume-integrated">
+                    <div class="vol-control">
+                        <label>🔔 알림 음량</label>
+                        <input type="range" id="volMelody" class="save-target" min="0" max="1" step="0.05" value="0.2">
+                    </div>
+                    <div class="vol-control">
+                        <label>🎵 공부 MP3 음량</label>
+                        <input type="range" id="volMp3" class="save-target" min="0" max="1" step="0.05" value="0.5" oninput="updateMp3Vol()">
+                    </div>
+                    <div class="vol-control">
+                        <label>🌳 휴식 음악 음량</label>
+                        <input type="range" id="volBreak" class="save-target" min="0" max="1" step="0.05" value="0.5" oninput="updateBreakVol()">
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <div class="main-controls">
+        <button id="startBtn" onclick="startRoutine()">▶ 루틴 시작</button>
+        <button id="stopBtn" onclick="stopRoutine()">⏹ 루틴 종료</button>
+    </div>
+
+    <audio id="mp3Player" loop></audio>
+    <audio id="breakPlayer" crossorigin="anonymous"></audio>
+
+<script>
+    /* ================= 전역 변수 및 설정 ================= */
+    let wakeLock = null; 
+    let currentMp3Url = null; 
+
+    /* ================= 기능 유틸리티 ================= */
+    function showToast(msg) {
+        const t = document.getElementById('toast');
+        t.innerText = msg; t.style.opacity = '1';
+        setTimeout(() => t.style.opacity = '0', 3000);
+    }
+
+    function toggleSettings() {
+        const content = document.getElementById('settingsContent');
+        const icon = document.getElementById('collapseIcon');
+        content.classList.toggle('hidden');
+        icon.innerText = content.classList.contains('hidden') ? '▼' : '▲';
+    }
+
+    function formatTime12(dateObj) {
+        let h = dateObj.getHours();
+        let m = dateObj.getMinutes();
+        const ampm = h >= 12 ? 'PM' : 'AM';
+        h = h % 12; h = h ? h : 12;
+        return `${ampm} ${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+    }
+
+    async function requestWakeLock() {
+        try {
+            if ('wakeLock' in navigator) {
+                wakeLock = await navigator.wakeLock.request('screen');
+            }
+        } catch (err) {
+            console.warn(`Wake Lock Error: ${err.name}, ${err.message}`);
+        }
+    }
+
+    /* ================= 자동 저장 및 다크모드 관리 ================= */
+    function saveSettings() {
+        const settings = {};
+        document.querySelectorAll('.save-target').forEach(el => {
+            settings[el.id] = el.value;
+        });
+        settings['darkMode'] = document.documentElement.classList.contains('dark-mode');
+        localStorage.setItem('smartTimerV48_settings', JSON.stringify(settings));
+    }
+
+    function loadSettings() {
+        const saved = localStorage.getItem('smartTimerV48_settings');
+        if (saved) {
+            const settings = JSON.parse(saved);
+            for (const key in settings) {
+                if (key === 'darkMode') {
+                    const isDark = document.documentElement.classList.contains('dark-mode');
+                    document.getElementById('darkModeBtn').innerText = isDark ? '☀️ 라이트 모드' : '🌙 다크 모드';
+                    continue;
+                }
+                const el = document.getElementById(key);
+                if (el) el.value = settings[key];
+            }
+        }
+        renderTimeline();
+    }
+
+    function toggleDarkMode(event) {
+        if (!document.startViewTransition) {
+            updateTheme();
+            return;
+        }
+
+        const x = event.clientX;
+        const y = event.clientY;
+        const endRadius = Math.hypot(Math.max(x, innerWidth - x), Math.max(y, innerHeight - y));
+
+        const isGoingToDark = !document.documentElement.classList.contains('dark-mode');
+
+        const transition = document.startViewTransition(() => {
+            updateTheme();
+        });
+
+        transition.ready.then(() => {
+            const keyframes = isGoingToDark
+                ? [ // Light -> Dark: Old(밝은 화면)이 작아짐
+                    { clipPath: `circle(${endRadius}px at ${x}px ${y}px)` },
+                    { clipPath: `circle(0px at ${x}px ${y}px)` }
+                  ]
+                : [ // Dark -> Light: New(밝은 화면)이 커짐
+                    { clipPath: `circle(0px at ${x}px ${y}px)` },
+                    { clipPath: `circle(${endRadius}px at ${x}px ${y}px)` }
+                  ];
+
+            document.documentElement.animate(keyframes, {
+                duration: 350,
+                easing: isGoingToDark ? 'ease-in' : 'ease-out',
+                pseudoElement: isGoingToDark ? '::view-transition-old(root)' : '::view-transition-new(root)'
+            });
+        });
+    }
+
+    function updateTheme() {
+        document.documentElement.classList.toggle('dark-mode');
+        const isDark = document.documentElement.classList.contains('dark-mode');
+        document.getElementById('darkModeBtn').innerText = isDark ? '☀️ 라이트 모드' : '🌙 다크 모드';
+        saveSettings();
+    }
+
+    /* ================= 오디오 및 비주얼라이저 관리 ================= */
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const mp3Player = document.getElementById('mp3Player');
+    const breakPlayer = document.getElementById('breakPlayer');
+    let isMp3Loaded = false;
+    let breakFiles = [];      
+    let breakPlaylist = [];   
+    let breakIndex = 0;       
+
+    let analyser;
+    let dataArray;
+    let bufferLength;
+    let animationId;
+    let isVisualizerConnected = false;
+    const canvas = document.getElementById('visualizerCanvas');
+    const ctx = canvas.getContext('2d');
+
+    function initVisualizer() {
+        if(isVisualizerConnected) return;
+        try {
+            const source = audioCtx.createMediaElementSource(breakPlayer);
+            analyser = audioCtx.createAnalyser();
+            source.connect(analyser);
+            analyser.connect(audioCtx.destination);
+            
+            analyser.smoothingTimeConstant = 0.9; 
+            analyser.fftSize = 256; 
+            bufferLength = analyser.frequencyBinCount;
+            dataArray = new Uint8Array(bufferLength);
+            
+            isVisualizerConnected = true;
+        } catch(e) {
+            console.warn("Visualizer init failed:", e);
+        }
+    }
+
+    function startVisualizer() {
+        canvas.style.display = 'block';
+        canvas.width = canvas.offsetWidth;
+        canvas.height = canvas.offsetHeight;
+        
+        function draw() {
+            animationId = requestAnimationFrame(draw);
+            analyser.getByteFrequencyData(dataArray);
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const isDark = document.documentElement.classList.contains('dark-mode');
+            const gradient = ctx.createLinearGradient(0, 0, canvas.width, 0);
+            
+            if(isDark) {
+                gradient.addColorStop(0, '#00bcd4');
+                gradient.addColorStop(1, '#7c4dff');
+            } else {
+                gradient.addColorStop(0, '#42a5f5');
+                gradient.addColorStop(1, '#ab47bc');
+            }
+            
+            ctx.fillStyle = gradient;
+
+            const barWidth = (canvas.width / bufferLength) * 2.5;
+            let barHeight;
+            let x = 0;
+
+            for(let i = 0; i < bufferLength; i++) {
+                barHeight = dataArray[i] / 2; 
+                ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+                x += barWidth + 1;
+            }
+        }
+        draw();
+    }
+
+    function stopVisualizer() {
+        if(animationId) cancelAnimationFrame(animationId);
+        canvas.style.display = 'none';
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+
+    function updateMp3Vol() { mp3Player.volume = document.getElementById('volMp3').value; }
+    function updateBreakVol() { breakPlayer.volume = document.getElementById('volBreak').value; }
+
+    document.getElementById('mp3File').addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if(file) { 
+            if (currentMp3Url) URL.revokeObjectURL(currentMp3Url);
+            currentMp3Url = URL.createObjectURL(file);
+            mp3Player.src = currentMp3Url; 
+            isMp3Loaded = true;
+            updateMp3Vol();
+            showToast("공부 MP3 로드됨"); 
+        }
+    });
+
+    document.getElementById('breakFolder').addEventListener('change', (e) => {
+        const files = Array.from(e.target.files);
+        breakFiles = files.filter(f => f.type.startsWith('audio/'));
+        if(breakFiles.length > 0) showToast(`${breakFiles.length}개의 휴식 음악을 찾았습니다.`);
+        else showToast("폴더에 오디오 파일이 없습니다.");
+    });
+
+    function shuffleArray(array) {
+        for (let i = array.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [array[i], array[j]] = [array[j], array[i]];
+        }
+        return array;
+    }
+
+    function playBreakMusic() {
+        if(breakFiles.length === 0) return;
+        if(breakPlaylist.length === 0 || breakIndex >= breakPlaylist.length) {
+            breakPlaylist = shuffleArray([...breakFiles]);
+            breakIndex = 0;
+        }
+
+        const file = breakPlaylist[breakIndex];
+        breakPlayer.src = URL.createObjectURL(file);
+        
+        const display = document.getElementById('nowPlayingDisplay');
+        display.innerText = `♪ Now Playing: ${file.name}`;
+        
+        updateBreakVol();
+        breakPlayer.play().then(() => {
+            if(!animationId && isVisualizerConnected) startVisualizer();
+        }).catch(e => console.log('Break Play blocked', e));
+    }
+
+    breakPlayer.onended = function() {
+        breakIndex++;
+        playBreakMusic();
+    };
+
+    function playMelody() {
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        const mVol = parseFloat(document.getElementById('volMelody').value);
+        const tones = [523.25, 659.25, 783.99, 1046.50];
+        tones.forEach((f, i) => {
+            setTimeout(() => {
+                if(!timerInterval) return; 
+                const o = audioCtx.createOscillator(); 
+                const g = audioCtx.createGain();
+                o.type = 'sine'; o.connect(g); g.connect(audioCtx.destination);
+                o.frequency.value = f; 
+                g.gain.setValueAtTime(mVol, audioCtx.currentTime);
+                g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
+                o.start(); o.stop(audioCtx.currentTime + 0.5);
+            }, i * 150);
+        });
+    }
+
+    /* ================= 스케줄 데이터 처리 ================= */
+    let schedule = [];
+    let timelineStart = 0;
+    let timelineDuration = 0;
+    let timerInterval = null;
+    let currentIndex = -999;
+
+    function timeToMin(str) { if(!str) return 0; const [h, m] = str.split(':').map(Number); return h * 60 + m; }
+    function minToTime(min) { 
+        let h = Math.floor(min / 60); let m = Math.floor(min % 60);
+        if(h >= 24) h -= 24; const ampm = h >= 12 ? 'PM' : 'AM';
+        let h12 = h % 12; if (h12 === 0) h12 = 12;
+        return `${ampm} ${h12}:${m.toString().padStart(2,'0')}`; 
+    }
+
+    function renderTimeline() {
+        schedule = [];
+        const start = timeToMin(document.getElementById('startTime').value);
+        const periods = parseInt(document.getElementById('totalPeriods').value) || 1;
+        const studyT = parseInt(document.getElementById('studyMin').value) || 1;
+        const breakT = parseInt(document.getElementById('breakMin').value) || 1;
+        const lunchT = parseInt(document.getElementById('lunchMin').value) || 1;
+        const lunchAfter = parseInt(document.getElementById('lunchAfter').value) || 99;
+
+        let cur = start; timelineStart = start;
+
+        for(let i=1; i<=periods; i++) {
+            schedule.push({ type: 'study', name: `${i}교시`, start: cur, end: cur + studyT });
+            cur += studyT;
+            if(i === lunchAfter) {
+                schedule.push({ type: 'lunch', name: '점심시간', start: cur, end: cur + lunchT });
+                cur += lunchT;
+            } else if (i < periods) {
+                schedule.push({ type: 'break', name: '휴식', start: cur, end: cur + breakT });
+                cur += breakT;
+            }
+        }
+        timelineDuration = cur - start;
+
+        const container = document.getElementById('timelineContainer');
+        Array.from(container.children).forEach(c => { if(c.id !== 'currentLine') c.remove(); });
+
+        schedule.forEach((item, idx) => {
+            const div = document.createElement('div');
+            div.className = `schedule-box box-${item.type}`;
+            div.id = `sch-${idx}`;
+            const widthPercent = ((item.end - item.start) / timelineDuration) * 100;
+            div.innerText = widthPercent > 3 ? item.name : '';
+            div.title = `${item.name} (${minToTime(item.start)} ~ ${minToTime(item.end)})`;
+            div.style.left = `${((item.start - timelineStart) / timelineDuration) * 100}%`;
+            div.style.width = `${widthPercent}%`;
+            container.appendChild(div);
+        });
+
+        const startH = Math.ceil(timelineStart / 60);
+        const endH = Math.floor((timelineStart + timelineDuration) / 60);
+        for(let h = startH; h <= endH; h++) {
+            const min = h * 60;
+            const percent = ((min - timelineStart) / timelineDuration) * 100;
+            if(percent >= 0 && percent <= 100) {
+                const mk = document.createElement('div');
+                mk.className = 'time-marker';
+                let dH = h % 24; const ampm = dH >= 12 ? 'PM' : 'AM';
+                let h12 = dH % 12; if(h12 === 0) h12 = 12;
+                mk.innerText = `${ampm} ${h12}`; mk.style.left = `${percent}%`;
+                container.appendChild(mk);
+            }
+        }
+    }
+
+    /* ================= 핵심 루틴 로직 ================= */
+    function startRoutine() {
+        if(timerInterval) clearInterval(timerInterval);
+        
+        if(audioCtx.state === 'suspended') audioCtx.resume();
+
+        mp3Player.volume = 0; 
+        breakPlayer.volume = 0;
+        
+        mp3Player.play().then(() => { 
+            mp3Player.pause(); 
+            mp3Player.currentTime = 0; 
+            updateMp3Vol(); 
+        }).catch(()=>{});
+
+        breakPlayer.play().then(() => { 
+            breakPlayer.pause(); 
+            breakPlayer.currentTime = 0; 
+            updateBreakVol(); 
+        }).catch(()=>{});
+
+        requestWakeLock();
+
+        initVisualizer();
+
+        renderTimeline();
+        document.getElementById('startBtn').style.display = 'none';
+        document.getElementById('stopBtn').style.display = 'block';
+        document.getElementById('currentLine').style.display = 'block';
+        document.querySelectorAll('input').forEach(el => { if(el.type !== 'range') el.disabled = true; });
+        showToast("루틴 시작!");
+        currentIndex = -999; checkTime();
+        timerInterval = setInterval(checkTime, 1000);
+    }
+
+    function stopRoutine() {
+        if(timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+        
+        mp3Player.pause(); mp3Player.currentTime = 0;
+        breakPlayer.pause(); breakPlayer.currentTime = 0;
+        
+        stopVisualizer(); 
+        document.getElementById('nowPlayingDisplay').innerText = "";
+
+        if (wakeLock !== null) {
+            wakeLock.release().then(() => { wakeLock = null; });
+        }
+
+        document.getElementById('startBtn').style.display = 'block';
+        document.getElementById('stopBtn').style.display = 'none';
+        document.getElementById('currentLine').style.display = 'none';
+        document.querySelectorAll('input').forEach(el => el.disabled = false);
+        updateDashboard('준비 대기 중', '', '');
+        document.querySelectorAll('.schedule-box').forEach(el => el.classList.remove('active'));
+        showToast("루틴 종료");
+    }
+
+    function checkTime() {
+        const now = new Date();
+        const nowMin = (now.getHours() * 60 + now.getMinutes()) + (now.getSeconds() / 60);
+        document.getElementById('clockDisplay').innerText = formatTime12(now);
+        const percent = ((nowMin - timelineStart) / timelineDuration) * 100;
+        const line = document.getElementById('currentLine');
+        if(percent >= 0 && percent <= 100) {
+            line.style.display = 'block'; line.style.left = `${percent}%`;
+        } else { line.style.display = 'none'; }
+
+        let found = -1;
+        for(let i=0; i<schedule.length; i++) {
+            if(nowMin >= schedule[i].start && nowMin < schedule[i].end) { found = i; break; }
+        }
+        if(found !== -1) {
+            const item = schedule[found];
+            const remain = Math.ceil(item.end - nowMin);
+            document.getElementById('remainDisplay').innerText = `${remain}분 남음`;
+
+            if (item.type === 'break' || item.type === 'lunch') {
+                const secondsLeft = (item.end - nowMin) * 60; 
+                const userVol = parseFloat(document.getElementById('volBreak').value);
+
+                if (secondsLeft <= 20) {
+                    if (secondsLeft > 10) {
+                        const ratio = (secondsLeft - 10) / 10;
+                        breakPlayer.volume = userVol * ratio;
+                    } else {
+                        breakPlayer.volume = 0;
+                    }
+                } else {
+                    if(Math.abs(breakPlayer.volume - userVol) > 0.01) breakPlayer.volume = userVol;
+                }
+            }
+        } else { document.getElementById('remainDisplay').innerText = `일정 없음`; }
+
+        if(found !== currentIndex) changeState(found);
+    }
+
+    function changeState(idx) {
+        if(currentIndex >= 0) document.getElementById(`sch-${currentIndex}`)?.classList.remove('active');
+        
+        mp3Player.pause();
+        breakPlayer.pause();
+        stopVisualizer(); 
+        document.getElementById('nowPlayingDisplay').innerText = "";
+
+        currentIndex = idx;
+        if(idx === -1) { updateDashboard('휴식/대기', '', ''); return; }
+
+        const item = schedule[idx];
+        document.getElementById(`sch-${idx}`)?.classList.add('active');
+        updateDashboard(item.name, '', item.type);
+        playMelody(); 
+
+        setTimeout(() => {
+            if(!timerInterval) return;
+            if(item.type === 'study') {
+                if(isMp3Loaded) { 
+                    updateMp3Vol();
+                    mp3Player.play().catch(e => console.log('Study Play blocked', e)); 
+                }
+            } else {
+                playBreakMusic();
+                if(isVisualizerConnected && !breakPlayer.paused) startVisualizer();
+            }
+        }, 2000);
+    }
+
+    function updateDashboard(title, sub, type) {
+        const board = document.getElementById('dashboard');
+        document.getElementById('activityDisplay').innerText = title;
+        board.className = 'dashboard'; 
+        if(type) board.classList.add(`mode-${type}`);
+    }
+
+    window.onload = () => {
+        loadSettings(); 
+        document.querySelectorAll('.save-target').forEach(el => {
+            el.addEventListener('change', saveSettings);
+        });
+        setInterval(() => {
+            if(!timerInterval) document.getElementById('clockDisplay').innerText = formatTime12(new Date());
+        }, 1000);
+        
+        window.addEventListener('resize', () => {
+            if(canvas.style.display !== 'none') {
+                canvas.width = canvas.offsetWidth;
+                canvas.height = canvas.offsetHeight;
+            }
+        });
+    };
+</script>
+</body>
+</html>
